@@ -1,9 +1,6 @@
 [ -z "$PS1" ] && return      # not an interactive shell? don't proceed.
 unalias -a                   # ditch any previous aliases. we don't want them.
 
-dotfiles_hosts="${HOME}/.dotfiles-hosts"
-dotfiles_store="${HOME}/.dotfiles-store"
-
 hostname="$(hostname -s)"
 
 function hr() {
@@ -63,7 +60,7 @@ ALERT=${BWhite}${On_Red} # Bold White on red background
 
 function _exit()              # Function to run upon exit of shell.
 {
-    echo -e "${BRed}Hasta la vista, baby${NC}"
+    kill_agent
 }
 trap _exit EXIT
 
@@ -75,81 +72,43 @@ echo_c() {
     printf "%"$(((COLUMNS-len-1-subtract)/2))"s\n" " "
 }
 
-function used_locally()
-{
-    df -P "$PWD" | awk 'END {sub(/%/,""); print $5}'
-}
-
-# Returns a color according to free disk space in $PWD.
-function disk_color()
-{
-    if [ ! -w "${PWD}" ] ; then
-        echo -en ${Red}
-        # No 'write' privilege in the current directory.
-    elif [ -s "${PWD}" ] ; then
-        local used="$(used_locally)"
-        if [ ${used} -gt 95 ]; then
-            echo -en ${ALERT}           # Disk almost full (>95%).
-        elif [ ${used} -gt 90 ]; then
-            echo -en ${BRed}            # Free disk space almost gone.
-        else
-            echo -en ${Green}           # Free disk space is ok.
-        fi
-    else
-        echo -en ${Cyan}
-        # Current directory is size '0' (like /proc, /sys etc).
-    fi
-}
-
-function info() {
-    cur_disk=$(df . | tail -1 | awk '{print $1}')
-    if [ ! -w "${PWD}" ]; then
-        disk_color=${Red}
-    elif [ -s "${PWD}" ]; then
-        used_of_disk=$(df -P "$PWD" | awk 'END {sub(/%/,""); print $5}')
-        disk_color=${Green}
-        [[ ${used_of_disk} -gt 90 ]] && disk_color=${BRed} 
-        [[ ${used_of_disk} -gt 95 ]] && disk_color=${ALERT}
-    else
-        disk_color=$Cyan
-    fi
-
-    pu="${Purple}${underline}"
-    pue="${NC}"
-    se="${Purple}-${NC}"
-
-    line="host{${pu}${USER}@${hostname}${pue},${pu}$(uname)${pue}}"
-    line="${line} ${se} path{${pu}${PWD}${pue}}"
-
-    pad=$(echo_c "${line}" 8)
-    echo -e "\n${pad} ${Purple}<~${NC} ${line} ${Purple}~>${NC} ${pad}"
-
-    if [ $used_of_disk -gt 75 ]; then
-        alert_line=" [${Purple}!!${NC}] Only $((100-used_of_disk))% of disk space remains on this disk."
-        pad=$(echo_c "${alert_line}" 2)
-        echo -e "${pad} ${alert_line} ${pad}"
-    fi
-}
+#
+# PROMPT STUFF - PS1/term_title/truncate_pwd
+#
 
 term_title () {
-    echo -ne "\033k${@}\033\\"
+    case ${TERM} in
+        xterm )
+            echo -ne "\033]0;${USER}@${HOSTNAME}: ${PWD}\007" ;;
+        xterm-256color | *term | rxvt | screen )
+            echo -ne "\033k${@}\033\\" ;;
+    esac
 }
 
-PROMPT_COMMAND="history -a; term_title ${USER}@$(hostname -s): ${PWD}"
+truncate_pwd () {
+    # How many characters of the $PWD should be kept
+    local pwdmaxlen=25
+    # Indicate that there has been dir truncation
+    local trunc_symbol=".."
+    local dir=${PWD##*/}
+    pwdmaxlen=$(( ( pwdmaxlen < ${#dir} ) ? ${#dir} : pwdmaxlen ))
+    NEW_PWD=${PWD/#$HOME/\~}
+    local pwdoffset=$(( ${#NEW_PWD} - pwdmaxlen ))
+    if [ ${pwdoffset} -gt "0" ]
+    then
+        NEW_PWD=${NEW_PWD:$pwdoffset:$pwdmaxlen}
+        NEW_PWD=${trunc_symbol}/${NEW_PWD#*/}
+    fi
+    NEW_PWD=${NEW_PWD}/
+    export NEW_PWD
+}
+
+PROMPT_COMMAND="history -a; truncate_pwd; term_title ${USER}@$(hostname -s): ${NEW_PWD}"
+PS1="\u@\h \${NEW_PWD} \$ "
 
 for dir in "/usr/local/bin" "${HOME}/.shell-scripts"; do
     [[ -d "$dir" ]] && export PATH="${dir}:${PATH}"
 done
-
-case ${TERM} in
-    xterm-256color | *term | rxvt | linux | screen)
-        PS1="\$ \[\e]0;[\u@\h] \w\a\]"
-        PS1="\[${Purple}\]{ \[${NC}\]\u\[${Purple}\]@\[${NC}\]\h\[${Purple}\]:\[${NC}\]\W \[${Purple}\]}${NC} \$ "
-        ;;
-    *)
-        PS1="\u@\h \w \$ "
-        ;;
-esac
 
 smartextract () {
     if [ -f $1 ]; then
@@ -228,6 +187,40 @@ if which unrarall &>/dev/null; then
     alias cur='clean_up_rars' # clean up all RAR files in directories (cur dir1 dir2 dir3) and their subdirectories.
 fi
 
+SSH_ENV="$HOME/.ssh/ssh_env"
+function start_agent () {
+    ssh-agent -s > "${SSH_ENV}"
+    chmod 600 "${SSH_ENV}"
+    . "${SSH_ENV}" > /dev/null
+    ssh-add
+}
+
+function check_agent () {
+    if [ -f "${SSH_ENV}" ]; then
+        . "${SSH_ENV}" > /dev/null
+    fi
+    [[ "${SSH_AGENT_PID}" = "" ]] && start_agent
+    ps -ef | grep ${SSH_AGENT_PID} | grep ssh-agent > /dev/null || {
+        start_agent
+    }
+}
+
+function kill_agent () {
+    BASH_COUNT=$(ps -uef | grep -- "-bash" | wc -l)
+    if [ ${BASH_COUNT} -eq 3 ]; then
+        [[ "${SSH_AGENT_PID}" = "" ]] && {
+            echo "no pid??"
+            sleep
+            return 1
+        }
+        echo -e "${BRed}Hasta la vista, baby${NC}"
+        kill -9 ${SSH_AGENT_PID}
+        sleep 1
+    fi
+}
+
+check_agent
+alias keys='ssh-add -l'
 
 function establish_ssh_masters() {
     if ! file "${dotfiles_hosts}"/* &>/dev/null; then
@@ -267,30 +260,6 @@ function establish_ssh_masters() {
     rm -f "$host_tmp"
 }
 alias esm='establish_ssh_masters' # establish ssh master connections to ${dotfile_hosts}
-
-function send_dot_files() {
-    if ! file "${dotfiles_store}"/* &>/dev/null; then
-        echo "No dotfiles recorded in ${dotfiles_store}"
-        return 1
-    fi
-    if ! file "${dotfiles_hosts}"/* &>/dev/null; then
-        echo "No hosts recorded in ${dotfiles_hosts}"
-        return 1
-    fi
-    for host in "${dotfiles_hosts}"/*; do
-        host=$(basename "$host")
-        for file in "${dotfiles_store}"/*; do
-            dest="."$(basename "$file")
-            echo -en "$file ${Purple}->${NC} ${host}:${dest} ${Purple}."
-            if scp "${file}" "${host}:${dest}" &>/dev/null; then
-                echo -e ". ${Green}OKAY${NC}"
-            else
-                echo -e ". ${Red}FAIL${NC}"
-            fi
-        done
-    done
-}
-alias sdf='send_dot_files' # send dotfiles to hosts in ~/.send-dot-files/* (basically, scp)
 
 function rehash_bash_profile() { source ~/.bashrc; }
 alias rh='rehash_bash_profile' # reload our bash_profile.
@@ -353,4 +322,3 @@ fi
 
 alias_if_exists() { [[ -x "$1" ]] && alias $(basename "$1")="$1"; }
 alias_if_exists "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport"
-
